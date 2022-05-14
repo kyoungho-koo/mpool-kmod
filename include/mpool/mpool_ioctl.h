@@ -719,6 +719,7 @@ union mpioc_union {
 #define MPIOC_VMA_DESTROY       _IOWR(MPIOC_MAGIC, 71, struct mpioc_vma)
 #define MPIOC_VMA_PURGE         _IOWR(MPIOC_MAGIC, 72, struct mpioc_vma)
 #define MPIOC_VMA_VRSS          _IOWR(MPIOC_MAGIC, 73, struct mpioc_vma)
+#define MPIOC_VMA_HOTNESS          _IOWR(MPIOC_MAGIC, 74, struct mpioc_vma)
 
 #define MPIOC_TEST              _IOWR(MPIOC_MAGIC, 99, struct mpioc_test)
 

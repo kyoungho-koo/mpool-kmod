@@ -1023,6 +1023,7 @@ again:
 	xvm->xvm_magic = 0xbadcafe;
 	xvm->xvm_rgn = -1;
 
+	kfree(xvm->xvm_mbidv);
 	kmem_cache_free(xvm->xvm_cache, xvm);
 
 	atomic_dec(&rm->rm_rgncnt);
@@ -3238,11 +3239,11 @@ static merr_t mpioc_xvm_create(struct mpc_unit *unit, struct mpioc_vma *ioc)
 	if (ioc->im_advice > MPC_VMA_PINNED)
 		return merr(EINVAL);
 
-	mult = 1;
+	mult = 10;
 	if (ioc->im_advice == MPC_VMA_WARM)
-		mult = 10;
-	else if (ioc->im_advice == MPC_VMA_HOT)
 		mult = 100;
+	else if (ioc->im_advice == MPC_VMA_HOT)
+		mult = 1000;
 
 	mpdesc = unit->un_mpool->mp_desc;
 	mbidc = ioc->im_mbidc;
@@ -3274,8 +3275,10 @@ static merr_t mpioc_xvm_create(struct mpc_unit *unit, struct mpioc_vma *ioc)
 	}
 
 	xvm->xvm_magic = (u32)(uintptr_t)xvm;
+	xvm->xvm_mbidv = mbidv;
 	xvm->xvm_mbinfoc = mbidc;
 	xvm->xvm_mpdesc = unit->un_mpool->mp_desc;
+	atomic64_set (&xvm->xvm_hotness, 0);
 
 	xvm->xvm_mapping = unit->un_mapping;
 	xvm->xvm_rgnmap = &unit->un_rgnmap;
@@ -3289,6 +3292,7 @@ static merr_t mpioc_xvm_create(struct mpc_unit *unit, struct mpioc_vma *ioc)
 	atomic_set(&xvm->xvm_reapref, 1);
 	atomic64_set(&xvm->xvm_nrpages, 0);
 	atomic_set(&xvm->xvm_rabusy, 0);
+	atomic64_set (&xvm->xvm_atime, local_clock());
 
 	largest = 0;
 	err = 0;
@@ -3308,6 +3312,8 @@ static merr_t mpioc_xvm_create(struct mpc_unit *unit, struct mpioc_vma *ioc)
 		mbinfo->mblen = ALIGN(props.mpr_write_len, PAGE_SIZE);
 		mbinfo->mbmult = mult;
 		atomic64_set(&mbinfo->mbatime, 0);
+		atomic64_set(&mbinfo->mb_pgfault_cnt, 0);
+		atomic64_set(&mbinfo->mb_hotness, 0);
 
 		largest = max_t(size_t, largest, mbinfo->mblen);
 	}
@@ -3347,7 +3353,7 @@ errout:
 		kmem_cache_free(cache, xvm);
 	}
 
-	kfree(mbidv);
+	//kfree(mbidv);
 
 	return err;
 }
@@ -3399,6 +3405,63 @@ static merr_t mpioc_xvm_purge(struct mpc_unit *unit, struct mpioc_vma *ioc)
 
 	mpc_reap_xvm_evict(xvm);
 
+	mpc_xvm_put(xvm);
+
+	return 0;
+}
+
+static merr_t mpioc_xvm_hotness(struct mpc_unit *unit, struct mpioc_vma *ioc) 
+{
+	struct mpc_xvm *xvm;
+	u64             rgn;
+	//struct mpc_mbinfo *mbinfop;
+	//u64				now;
+
+	if (ev(!unit || !ioc))
+		return merr(EINVAL);
+
+	rgn = ioc->im_offset >> mpc_xvm_size_max;
+
+	xvm = mpc_xvm_lookup(&unit->un_rgnmap, rgn);
+	atomic64_set (&xvm->xvm_hotness, ioc->im_rsvd);
+	
+	if (!xvm)
+		return merr(ENOENT);
+
+	//mbinfop = xvm->xvm_mbinfov + ioc->im_rsvd % 32;
+
+	/*
+	now = local_clock();
+	printk ("%s interval: %lld hotness: %lld\n", 
+			__func__,
+			(now - atomic64_read(&xvm->xvm_atime)) >> 20,
+			ioc->im_rsvd);
+			*/
+
+
+	/*
+	if (mbinfop) {
+		// update hotness
+		printk ("%s xvm_mbinfoc: %d xvm_mbidv[%lld]: %lld xvm_nrpages: %lld xvm_reapref: %d vindex: %lld mb_hotness: %lld\n",
+				__func__, 
+				xvm->xvm_mbinfoc,
+				ioc->im_rsvd % 32,
+				xvm->xvm_mbidv[ioc->im_rsvd % 32],
+				atomic64_read(&xvm->xvm_nrpages),
+				atomic_read(&xvm->xvm_reapref),
+				ioc->im_rsvd,
+				atomic64_inc_return(&mbinfop->mb_hotness)+1);
+	} else {
+		printk ("%s xvm_mbinfoc: %d xvm_mbidv[%lld]: %lld xvm_nrpages: %lld xvm_reapref: %d vindex: %lld mbinfop: NULL\n", 
+				__func__, 
+				xvm->xvm_mbinfoc,
+				ioc->im_rsvd % 32,
+				xvm->xvm_mbidv[ioc->im_rsvd % 32],
+				atomic64_read(&xvm->xvm_nrpages),
+				atomic_read(&xvm->xvm_reapref),
+				ioc->im_rsvd);
+	}
+	*/
 	mpc_xvm_put(xvm);
 
 	return 0;
@@ -3640,6 +3703,10 @@ static long mpc_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 
 	case MPIOC_VMA_VRSS:
 		err = mpioc_xvm_vrss(unit, argp);
+		break;
+
+	case MPIOC_VMA_HOTNESS:
+		err = mpioc_xvm_hotness(unit, argp);
 		break;
 
 	case MPIOC_TEST:

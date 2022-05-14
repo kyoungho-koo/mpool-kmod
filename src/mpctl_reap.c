@@ -138,6 +138,7 @@ static void mpc_reap_evict_vma(struct mpc_xvm *xvm)
 {
 	struct address_space   *mapping = xvm->xvm_mapping;
 	struct mpc_reap        *reap = xvm->xvm_reap;
+	u32 hotness;
 
 	pgoff_t off, bktsz, len;
 	u64     ttl, xtime, now;
@@ -149,16 +150,24 @@ static void mpc_reap_evict_vma(struct mpc_xvm *xvm)
 	ttl = atomic_read(&reap->reap_ttl_cur) * 1000ul;
 	now = local_clock();
 
+	hotness = 1000000000 * atomic64_read (&xvm->xvm_hotness) / (now - atomic64_read(&xvm->xvm_atime));
 	for (i = 0; i < xvm->xvm_mbinfoc; ++i, off += bktsz) {
 		struct mpc_mbinfo *mbinfo = xvm->xvm_mbinfov + i;
+		min_t (u32, hotness, 1000);
 
-		xtime = now - (ttl * mbinfo->mbmult);
+//		xtime = now - (ttl * mbinfo->mbmult);
+		xtime = now - (ttl * max_t(u32,  hotness, mbinfo->mbmult));
+	
+		/*
+		xtime = now - (ttl * (mbinfo->mbmult * atomic64_read(&mbinfo->mb_hotness)));
+		*/
 		len = mbinfo->mblen >> PAGE_SHIFT;
 
 		if (atomic64_read(&mbinfo->mbatime) > xtime)
 			continue;
 
 		atomic64_set(&mbinfo->mbatime, U64_MAX);
+		atomic64_set(&mbinfo->mb_hotness, 0);
 
 		invalidate_inode_pages2_range(mapping, off, off + len);
 
@@ -182,8 +191,17 @@ static void mpc_reap_evict(struct list_head *process)
 	struct mpc_xvm *xvm, *next;
 
 	list_for_each_entry_safe(xvm, next, process, xvm_list) {
-		if (atomic_read(&xvm->xvm_reap->reap_lwm))
+		if (atomic_read(&xvm->xvm_reap->reap_lwm)) {
+			/*
+			printk ("%s xvm_mbinfoc: %d xvm_mbidv[0]: %lld xvm_nrpages: %lld xvm_reapref: %d\n", 
+					__func__, 
+					xvm->xvm_mbinfoc,
+					xvm->xvm_mbidv[0],
+					atomic64_read(&xvm->xvm_nrpages),
+					atomic_read(&xvm->xvm_reapref));
+					*/
 			mpc_reap_evict_vma(xvm);
+		}
 
 		atomic_cmpxchg(&xvm->xvm_evicting, 1, 0);
 	}
@@ -199,6 +217,11 @@ static void mpc_reap_scan(struct mpc_reap_elem *elem)
 	struct list_head   *list, process;
 	struct mpc_xvm     *xvm, *next;
 	u64                 nrpages, n;
+	/*
+	char				buf[256];
+	char				*bufp = buf;
+	int					i;
+	*/
 
 	INIT_LIST_HEAD(&process);
 
@@ -217,6 +240,24 @@ static void mpc_reap_scan(struct mpc_reap_elem *elem)
 
 		if (atomic_cmpxchg(&xvm->xvm_evicting, 0, 1))
 			continue;
+
+		/*
+		bufp += sprintf(bufp, "%s xvm_mbinfoc: %d xvm_mbidv: [ ",__func__, xvm->xvm_mbinfoc);
+		for (i = 0; i < xvm->xvm_mbinfoc; i++) {
+			bufp += sprintf(bufp, "%lld ", xvm->xvm_mbidv[i]);
+		}
+		bufp += sprintf(bufp, "] nrpages: %lld xvm_repref: %d", nrpages, atomic_read(&xvm->xvm_reapref));
+		printk("%s\n", buf);
+		*/
+
+		/*
+		printk ("%s xvm_mbinfoc: %d xvm_mbidv[0]: %lld nrpages: %lld xvm_reapref: %d\n", 
+				__func__, 
+				xvm->xvm_mbinfoc,
+				xvm->xvm_mbidv[0],
+				nrpages,
+				atomic_read(&xvm->xvm_reapref));
+		*/
 
 		list_del(&xvm->xvm_list);
 		list_add(&xvm->xvm_list, &process);
@@ -309,18 +350,26 @@ static void mpc_reap_tune(struct mpc_reap *reap)
 	}
 
 	debug = reap->reap_debug;
+	mp_pr_info(
+		"%lu %lu, hot %lu, warm %lu, cold %lu, freepct %u, lwm %u, hwm %u, %2u, ttl %u",
+		mfree >> (20 - PAGE_SHIFT), total_pages >> (20 - PAGE_SHIFT),
+		hpages >> (20 - PAGE_SHIFT), wpages >> (20 - PAGE_SHIFT),
+		cpages >> (20 - PAGE_SHIFT), freepct, lwm, hwm,
+		atomic_read(&reap->reap_lwm), atomic_read(&reap->reap_ttl_cur) / 1000);
 	if (!debug || (debug == 1 && freepct > hwm))
 		return;
 
 	if (atomic_inc_return(&reap->reap_emit) % REAP_ELEM_MAX > 0)
 		return;
 
+	/*
 	mp_pr_info(
 		"%s: %lu %lu, hot %lu, warm %lu, cold %lu, freepct %u, lwm %u, hwm %u, %2u, ttl %u",
 		__func__, mfree >> (20 - PAGE_SHIFT), total_pages >> (20 - PAGE_SHIFT),
 		hpages >> (20 - PAGE_SHIFT), wpages >> (20 - PAGE_SHIFT),
 		cpages >> (20 - PAGE_SHIFT), freepct, lwm, hwm,
 		atomic_read(&reap->reap_lwm), atomic_read(&reap->reap_ttl_cur) / 1000);
+		*/
 }
 
 static void mpc_reap_prune(struct work_struct *work)
@@ -532,8 +581,8 @@ merr_t mpc_reap_create(struct mpc_reap **reapp)
 		atomic_set(&elem->reap_nfreed, 0);
 	}
 
-	reap->reap_ttl   = 10 * 1000 * 1000;
-	reap->reap_debug = 0;
+	reap->reap_ttl   = 1000 * 1000;
+	reap->reap_debug = 1;
 	mpc_reap_mempct_init(reap);
 
 	INIT_DELAYED_WORK(&reap->reap_dwork, mpc_reap_prune);
@@ -588,11 +637,11 @@ void mpc_reap_xvm_add(struct mpc_reap *reap, struct mpc_xvm *xvm)
 	if (xvm->xvm_advice == MPC_VMA_PINNED)
 		return;
 
-	mult = 1;
+	mult = 10;
 	if (xvm->xvm_advice == MPC_VMA_WARM)
-		mult = 10;
+		mult = 100;
 	else if (xvm->xvm_advice == MPC_VMA_HOT)
-		mult = 30;
+		mult = 300;
 
 	/* Acquire a reference on xvm for the reaper...
 	 */
@@ -657,6 +706,7 @@ void mpc_reap_xvm_touch(struct mpc_xvm *xvm, int index)
 	mbnum = offset / xvm->xvm_bktsz;
 
 	atimep = &xvm->xvm_mbinfov[mbnum].mbatime;
+	atomic64_inc(&xvm->xvm_mbinfov[mbnum].mb_pgfault_cnt);
 	now = local_clock();
 
 	/* Don't update atime too frequently.  If we set atime to

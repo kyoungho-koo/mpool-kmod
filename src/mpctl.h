@@ -20,16 +20,20 @@ struct mpc_mbinfo {
 	struct mblock_descriptor   *mbdesc;
 	u32                         mblen;
 	u32                         mbmult;
+	atomic64_t                  mb_hotness;
+	atomic64_t                  mb_pgfault_cnt;
 	atomic64_t                  mbatime;
 } __aligned(32);
 
 struct mpc_xvm {
 	size_t                      xvm_bktsz;
+	u64						   *xvm_mbidv;
 	uint                        xvm_mbinfoc;
 	uint                        xvm_rgn;
 	struct kref                 xvm_ref;
 	u32                         xvm_magic;
 	struct mpool_descriptor    *xvm_mpdesc;
+	atomic64_t					xvm_hotness;
 
 	atomic64_t                 *xvm_hcpagesp;
 	struct address_space       *xvm_mapping;
@@ -46,6 +50,7 @@ struct mpc_xvm {
 	atomic_t                    xvm_evicting;
 	atomic_t                    xvm_reapref;
 	atomic_t                   *xvm_freedp;
+	atomic64_t                  xvm_atime;
 
 	____cacheline_aligned
 	atomic64_t                  xvm_nrpages;
